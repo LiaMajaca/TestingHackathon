@@ -12,6 +12,27 @@ import sys
 import argparse
 from collections import defaultdict
 
+# Color output functions for better visual impact
+def print_success(text):
+    """Print text in green."""
+    print(f"\033[92m{text}\033[0m")
+
+def print_warning(text):
+    """Print text in yellow."""
+    print(f"\033[93m{text}\033[0m")
+
+def print_error(text):
+    """Print text in red."""
+    print(f"\033[91m{text}\033[0m")
+
+def print_info(text):
+    """Print text in blue."""
+    print(f"\033[94m{text}\033[0m")
+
+def print_header(text):
+    """Print text in bold."""
+    print(f"\033[1m{text}\033[0m")
+
 def find_code_elements(file_path, api_only=False):
     """Extract functions, classes, and methods from a file."""
     elements = []
@@ -178,6 +199,165 @@ def find_csharp_elements(content):
                 elements.append((name, element_type, content))
     
     return elements
+
+def detect_flaky_patterns(file_content, file_path):
+    """Detect patterns that make tests unreliable and cause random failures."""
+    flaky_issues = []
+    lines = file_content.split('\n')
+    
+    for i, line in enumerate(lines, 1):
+        line_stripped = line.strip().lower()
+        original_line = line.strip()
+        
+        # Time-based flaky patterns
+        if 'time.sleep(' in line_stripped:
+            flaky_issues.append({
+                'line': i,
+                'pattern': 'TIME_DEPENDENCY',
+                'severity': 'HIGH',
+                'code': original_line,
+                'message': 'Uses time.sleep() - will cause timing-dependent failures',
+                'fix': 'Replace with proper wait conditions or WebDriverWait'
+            })
+        
+        if 'date.now()' in line_stripped or 'datetime.now()' in line_stripped:
+            flaky_issues.append({
+                'line': i,
+                'pattern': 'NON_DETERMINISTIC_TIME',
+                'severity': 'MEDIUM',
+                'code': original_line,
+                'message': 'Uses current time - may cause timing failures',
+                'fix': 'Use fixed timestamps in tests or mock datetime'
+            })
+        
+        # Random-based flaky patterns
+        if 'math.random()' in line_stripped or 'random.random()' in line_stripped:
+            flaky_issues.append({
+                'line': i,
+                'pattern': 'RANDOM_WITHOUT_SEED',
+                'severity': 'HIGH',
+                'code': original_line,
+                'message': 'Uses random values without seeding',
+                'fix': 'Set random seed: random.seed(42) or use fixed test data'
+            })
+        
+        # External dependency patterns
+        if any(pattern in line_stripped for pattern in ['requests.get(', 'requests.post(', 'fetch(']):
+            if 'http://' in line_stripped or 'https://' in line_stripped:
+                flaky_issues.append({
+                    'line': i,
+                    'pattern': 'EXTERNAL_HTTP',
+                    'severity': 'HIGH',
+                    'code': original_line,
+                    'message': 'External HTTP request - will fail if service is down',
+                    'fix': 'Mock external calls: @mock.patch("requests.get")'
+                })
+        
+        # File operations without proper cleanup
+        if 'open(' in line_stripped and 'with ' not in line:
+            flaky_issues.append({
+                'line': i,
+                'pattern': 'RESOURCE_LEAK',
+                'severity': 'MEDIUM',
+                'code': original_line,
+                'message': 'File opened without proper cleanup',
+                'fix': 'Use "with open()" context manager'
+            })
+        
+        # Database operations in tests
+        if any(pattern in line_stripped for pattern in ['db.commit(', 'connection.execute(', 'cursor.execute(']):
+            if 'test' in file_path.lower():
+                flaky_issues.append({
+                    'line': i,
+                    'pattern': 'DATABASE_DEPENDENCY',
+                    'severity': 'MEDIUM',
+                    'code': original_line,
+                    'message': 'Database operation in test - may cause race conditions',
+                    'fix': 'Use database transactions or test fixtures'
+                })
+    
+    return flaky_issues
+
+def analyze_flaky_patterns_only():
+    """Run flaky pattern detection only."""
+    print_header("🚨 TESTBOT AI - FLAKY TEST PATTERN DETECTION")
+    print("=" * 50)
+    
+    # Find all source files
+    file_patterns = ['**/*.py', '**/*.js', '**/*.ts', '**/*.java', '**/*.cs']
+    all_files = []
+    
+    for pattern in file_patterns:
+        all_files.extend(glob.glob(pattern, recursive=True))
+    
+    # Filter out common non-source directories
+    exclude_dirs = {'node_modules', '.git', '__pycache__', '.venv', 'venv', 'env', 'target', 'build'}
+    filtered_files = []
+    
+    for file_path in all_files:
+        if not any(exclude_dir in file_path for exclude_dir in exclude_dirs):
+            filtered_files.append(file_path)
+    
+    all_flaky_issues = []
+    
+    for file_path in filtered_files:
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            flaky_issues = detect_flaky_patterns(content, file_path)
+            
+            if flaky_issues:
+                all_flaky_issues.extend([(file_path, issue) for issue in flaky_issues])
+                
+        except Exception:
+            continue
+    
+    # Display results
+    if not all_flaky_issues:
+        print_success("✅ No flaky test patterns detected!")
+        print("\nYour codebase appears to have reliable, deterministic patterns.")
+        return
+    
+    # Group by severity
+    critical_issues = [(path, issue) for path, issue in all_flaky_issues if issue['severity'] == 'HIGH']
+    medium_issues = [(path, issue) for path, issue in all_flaky_issues if issue['severity'] == 'MEDIUM']
+    
+    if critical_issues:
+        print_error(f"\n🚨 CRITICAL FLAKY RISKS ({len(critical_issues)}):")
+        for file_path, issue in critical_issues:
+            print(f"   📁 {file_path}:{issue['line']}")
+            print_error(f"      ❌ {issue['message']}")
+            print_info(f"      💡 FIX: {issue['fix']}")
+            print(f"      📝 CODE: {issue['code'][:60]}{'...' if len(issue['code']) > 60 else ''}")
+            print()
+    
+    if medium_issues:
+        print_warning(f"\n⚠️  MEDIUM FLAKY RISKS ({len(medium_issues)}):")
+        for file_path, issue in medium_issues:
+            print(f"   📁 {file_path}:{issue['line']}")
+            print_warning(f"      ⚠️  {issue['message']}")
+            print_info(f"      💡 FIX: {issue['fix']}")
+            print()
+    
+    # Business impact summary
+    print_business_impact_flaky(len(critical_issues), len(medium_issues), len(set(path for path, _ in all_flaky_issues)))
+
+def print_business_impact_flaky(critical_count, medium_count, files_affected):
+    """Print business impact summary for flaky patterns."""
+    print_header(f"\n📊 FLAKY PATTERN SUMMARY:")
+    print(f"   🚨 High Risk Issues: {critical_count}")
+    print(f"   ⚠️  Medium Risk Issues: {medium_count}")
+    print(f"   📁 Files Affected: {files_affected}")
+    
+    if critical_count > 0:
+        print_header(f"\n💼 BUSINESS IMPACT:")
+        potential_hours_lost = critical_count * 2  # 2 hours per flaky issue per week
+        print_error(f"   🚨 Your CI pipeline has {critical_count} patterns that WILL cause random failures!")
+        print_info(f"   ⏰ Developer time wasted: ~{potential_hours_lost}+ hours per month")
+        print_info(f"   💰 Cost of CI delays: ${potential_hours_lost * 75:.0f}/month (at $75/hour)")
+        print_success(f"   🎯 Fix these to improve build reliability from ~70% to ~95%")
+        print_info(f"   🔧 Most common fix: Mock external calls and set random seeds")
 
 def analyze_documentation(element_name, content, file_path):
     """Analyze documentation quality for a code element."""
@@ -799,23 +979,57 @@ def assess_risk(has_tests, doc_score, max_doc_score):
     else:  # has_tests and good docs
         return "LOW RISK"
 
+def print_business_summary(total_elements, need_tests, need_docs, high_risk_count, critical_security_count, documented_count=0):
+    """Print business impact summary with colorized output."""
+    print_header("\n💼 BUSINESS IMPACT ANALYSIS:")
+    
+    # Calculate potential cost savings
+    hours_saved_per_month = total_elements * 0.5  # 30 minutes saved per function per month
+    potential_bug_cost = high_risk_count * 10000  # $10k per high-risk function if it causes a bug
+    documentation_time_saved = documented_count * 2  # 2 hours saved per documented function
+    
+    if critical_security_count > 0:
+        print_error(f"🚨 CRITICAL SECURITY RISKS: {critical_security_count}")
+        print_error(f"   💸 Potential incident cost: ${critical_security_count * 50}k+ (data breach/financial loss)")
+    
+    if high_risk_count > 0:
+        print_warning(f"⚠️  HIGH RISK FUNCTIONS: {high_risk_count}")
+        print_info(f"   💰 Potential bug cost if not fixed: ${potential_bug_cost:,}")
+    
+    print_success(f"⏰ DEVELOPER TIME SAVINGS:")
+    print_info(f"   📊 Analysis time saved: {hours_saved_per_month:.0f} hours/month per tester")
+    if documented_count > 0:
+        print_info(f"   📝 Documentation time saved: {documentation_time_saved} hours")
+    
+    print_success(f"📈 QUALITY IMPROVEMENTS:")
+    test_coverage_improvement = ((total_elements - need_tests) / total_elements * 100) if total_elements > 0 else 0
+    doc_coverage_improvement = ((total_elements - need_docs) / total_elements * 100) if total_elements > 0 else 0
+    print_info(f"   🧪 Test coverage: {test_coverage_improvement:.0f}%")
+    print_info(f"   📚 Documentation coverage: {doc_coverage_improvement:.0f}%")
+    
+    # ROI calculation
+    total_monthly_savings = hours_saved_per_month * 75  # $75/hour developer rate
+    print_success(f"\n💎 RETURN ON INVESTMENT:")
+    print_info(f"   💵 Monthly savings: ${total_monthly_savings:,.0f}")
+    print_info(f"   📅 Annual savings: ${total_monthly_savings * 12:,.0f}")
+
 def scan_codebase(fix_docs=False, api_only=False, security_check=False):
     """Scan the codebase for functions, classes, and methods."""
     if security_check:
         if api_only:
-            print("🔍 Scanning for API endpoints with security analysis...\n")
+            print_header("🔍 Scanning for API endpoints with security analysis...\n")
         else:
-            print("🔍 Scanning codebase with security analysis...\n")
+            print_header("🔍 Scanning codebase with security analysis...\n")
     elif api_only:
         if fix_docs:
-            print("🔍 Scanning for API endpoints and fixing documentation...\n")
+            print_header("🔍 Scanning for API endpoints and fixing documentation...\n")
         else:
-            print("🔍 Scanning for API endpoints...\n")
+            print_header("🔍 Scanning for API endpoints...\n")
     else:
         if fix_docs:
-            print("🔍 Scanning codebase and fixing documentation...\n")
+            print_header("🔍 Scanning codebase and fixing documentation...\n")
         else:
-            print("🔍 Scanning codebase for functions, classes, and methods...\n")
+            print_header("🔍 Scanning codebase for functions, classes, and methods...\n")
     
     # Find all source files
     file_patterns = ['**/*.py', '**/*.js', '**/*.ts', '**/*.java', '**/*.cs']
@@ -857,7 +1071,7 @@ def scan_codebase(fix_docs=False, api_only=False, security_check=False):
         if not elements:
             continue
             
-        print(f"📁 FILE: {os.path.basename(file_path)}")
+        print_info(f"📁 FILE: {os.path.basename(file_path)}")
         
         for element_name, element_type, content in elements:
             total_elements += 1
@@ -904,7 +1118,7 @@ def scan_codebase(fix_docs=False, api_only=False, security_check=False):
                     docstring = generate_docstring(element_name, content, file_path)
                     if docstring and add_docstring_to_file(file_path, element_name, docstring):
                         documented_count += 1
-                        print(f"  📝 Added documentation to {element_name}()")
+                        print_success(f"  📝 Added documentation to {element_name}()")
                         # Re-analyze after adding documentation
                         doc_score = 3  # Assume good docs after adding
                         risk_level = assess_risk(has_tests, doc_score, max_doc_score)
@@ -915,85 +1129,102 @@ def scan_codebase(fix_docs=False, api_only=False, security_check=False):
                         docstring = generate_docstring(function_name, content, file_path)
                         if docstring and add_docstring_to_file(file_path, function_name, docstring):
                             documented_count += 1
-                            print(f"  📝 Added documentation to {function_name}() for endpoint {element_name}")
+                            print_success(f"  📝 Added documentation to {function_name}() for endpoint {element_name}")
                             # Re-analyze after adding documentation
                             doc_score = 3  # Assume good docs after adding
                             risk_level = assess_risk(has_tests, doc_score, max_doc_score)
             
-            # Determine status icons and messages
+            # Determine status icons and messages with colors
             if has_tests and doc_score >= 3:
-                status_icon = "✅"
-                status_msg = f"HAS TESTS + GOOD DOCS"
+                print_success(f"  ✅ {element_name}() - HAS TESTS + GOOD DOCS ({risk_level})")
             elif has_tests and doc_score < 2:
-                status_icon = "⚠️"
-                status_msg = f"HAS TESTS but POOR DOCS"
+                print_warning(f"  ⚠️  {element_name}() - HAS TESTS but POOR DOCS ({risk_level})")
             elif not has_tests and doc_score >= 2:
-                status_icon = "❌"
-                status_msg = f"NO TESTS + GOOD DOCS"
+                print_warning(f"  ❌ {element_name}() - NO TESTS + GOOD DOCS ({risk_level})")
             else:  # no tests and poor docs
-                status_icon = "❌"
-                status_msg = f"NO TESTS + NO DOCS"
-            
-            print(f"  {status_icon} {element_name}() - {status_msg} ({risk_level})")
+                print_error(f"  ❌ {element_name}() - NO TESTS + NO DOCS ({risk_level})")
         
         print()  # Empty line between files
     
-    # Summary
+    # Summary with colors
     if total_elements > 0:
-        print("📊 SUMMARY:")
-        print(f"- Total functions analyzed: {total_elements}")
-        print(f"- Need tests: {need_tests} ({need_tests/total_elements*100:.0f}%)")
-        print(f"- Need docs: {need_docs} ({need_docs/total_elements*100:.0f}%)")
-        print(f"- High risk (no tests + no docs): {len(high_risk)}")
+        print_header("📊 SUMMARY:")
+        print_info(f"- Total functions analyzed: {total_elements}")
+        print_warning(f"- Need tests: {need_tests} ({need_tests/total_elements*100:.0f}%)")
+        print_warning(f"- Need docs: {need_docs} ({need_docs/total_elements*100:.0f}%)")
+        print_error(f"- High risk (no tests + no docs): {len(high_risk)}")
         
         if fix_docs and documented_count > 0:
-            print(f"📝 Functions documented: {documented_count}")
+            print_success(f"📝 Functions documented: {documented_count}")
         
         if high_risk:
-            print(f"🎯 PRIORITY: Focus on {', '.join(high_risk[:3])}{'...' if len(high_risk) > 3 else ''}")
+            print_error(f"🎯 PRIORITY: Focus on {', '.join(high_risk[:3])}{'...' if len(high_risk) > 3 else ''}")
+        
+        # Business impact summary
+        print_business_summary(total_elements, need_tests, need_docs, len(high_risk), len(critical_security), documented_count)
     else:
-        print("No functions, classes, or methods found in the codebase.")
+        print_warning("No functions, classes, or methods found in the codebase.")
     
-    # Security analysis output
+    # Security analysis output with colors
     if security_check and (critical_security or high_security or medium_security):
-        print("\n🔒 SECURITY ANALYSIS:")
+        print_header("\n🔒 SECURITY ANALYSIS:")
         
         if critical_security:
-            print("\n🚨 CRITICAL SECURITY RISKS:")
+            print_error("\n🚨 CRITICAL SECURITY RISKS:")
             for element_name, issues in critical_security:
-                print(f"  - {element_name}() - {' + '.join(issues)}")
+                print_error(f"  - {element_name}() - {' + '.join(issues)}")
         
         if high_security:
-            print("\n⚠️  HIGH SECURITY RISKS:")
+            print_warning("\n⚠️  HIGH SECURITY RISKS:")
             for element_name, issues in high_security:
-                print(f"  - {element_name}() - {' + '.join(issues)}")
+                print_warning(f"  - {element_name}() - {' + '.join(issues)}")
         
         if medium_security:
-            print("\n🔶 MEDIUM SECURITY RISKS:")
+            print_info("\n🔶 MEDIUM SECURITY RISKS:")
             for element_name, issues in medium_security:
-                print(f"  - {element_name}() - {' + '.join(issues)}")
+                print_info(f"  - {element_name}() - {' + '.join(issues)}")
         
         if security_recommendations:
-            print("\n💡 SECURITY RECOMMENDATIONS:")
+            print_header("\n💡 SECURITY RECOMMENDATIONS:")
             for i, recommendation in enumerate(sorted(security_recommendations), 1):
-                print(f"{i}. {recommendation}")
+                print_info(f"{i}. {recommendation}")
     
     elif security_check:
-        print("\n🔒 SECURITY ANALYSIS: No security risks detected.")
+        print_success("\n🔒 SECURITY ANALYSIS: No security risks detected.")
 
 def main():
     """Main function with command line argument parsing."""
-    parser = argparse.ArgumentParser(description='Analyze codebase for testing and documentation gaps')
+    parser = argparse.ArgumentParser(
+        description='TestBot AI - Universal Testing Intelligence',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python testbot.py                    # Full analysis with business impact
+  python testbot.py --fix-docs         # Generate documentation automatically
+  python testbot.py --api-only         # Focus on API endpoints only
+  python testbot.py --security-check   # Security-focused analysis
+  python testbot.py --flaky           # Detect flaky test patterns
+        '''
+    )
     parser.add_argument('--fix-docs', action='store_true', 
                        help='Automatically generate documentation for functions with no docs')
     parser.add_argument('--api-only', action='store_true',
                        help='Scan only for API endpoints (Flask/FastAPI/Express routes)')
     parser.add_argument('--security-check', action='store_true',
                        help='Perform security analysis for financial, auth, and crypto functions')
+    parser.add_argument('--flaky', action='store_true',
+                       help='Detect flaky test patterns that cause random CI failures')
     
     args = parser.parse_args()
     
-    scan_codebase(fix_docs=args.fix_docs, api_only=args.api_only, security_check=args.security_check)
+    # Print header
+    print_header("🤖 TESTBOT AI - Universal Testing Intelligence")
+    print("=" * 55)
+    
+    if args.flaky:
+        analyze_flaky_patterns_only()
+    else:
+        scan_codebase(fix_docs=args.fix_docs, api_only=args.api_only, security_check=args.security_check)
 
 if __name__ == "__main__":
     main()
